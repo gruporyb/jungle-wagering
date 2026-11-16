@@ -7,13 +7,12 @@ publica eventos por **outbox transacional**.
 **Stack:** Bun 1.x · TypeScript estrito · NestJS · PostgreSQL 16 · MikroORM (pool/transação) · AWS SQS (LocalStack) ·
 Docker Compose · migrations SQL versionadas e reversíveis.
 
-> **Estado de verificação:** **317 testes executados e passando** contra PostgreSQL 16 real (179 unitários, 121 de
-> integração, 17 de concorrência), a stack Docker Compose (3 instâncias + PostgreSQL + LocalStack) sobe saudável e os
-> **10 testes E2E** (HTTP e SQS reais) passam. Depois dessa execução foram acrescentados 3 testes unitários da trava de
-> banco de teste (`test/unit/test-database-guard.test.ts`; lógica validada em Node, suíte ainda não executada no Bun), por
-> isso `test:unit` agora lista 182. O que **não** é coberto está em
-> [`ARCHITECTURE.md` §15](./ARCHITECTURE.md#15-limitações-riscos-e-o-que-não-foi-verificado). Se algo falhar no seu
-> ambiente, veja [Solução de problemas](#solução-de-problemas).
+> **Estado de verificação:** o núcleo (domínio, casos de uso, repositórios, migrations, consumidor, outbox,
+> workers) tem **317 testes passando contra PostgreSQL 16 real** (179 unitários, 121 de integração, 17 de
+> concorrência). A camada NestJS/MikroORM/AWS SDK e o Docker Compose foram exercitados depois, numa execução real:
+> stack no ar (3 instâncias + PostgreSQL + LocalStack) e **10 testes E2E passando**. O texto de
+> [`ARCHITECTURE.md` §15](./ARCHITECTURE.md#15-limitações-riscos-e-o-que-não-foi-verificado) descreve o estado anterior
+> a essa execução. Se algo falhar no seu ambiente, veja [Solução de problemas](#solução-de-problemas).
 
 Decisões, trade-offs, taxonomia de falhas, máquina de estados e interpretações de regra: **[`ARCHITECTURE.md`](./ARCHITECTURE.md)**.
 
@@ -67,22 +66,22 @@ bun run migration:down                     # reverte 1 migration (use `... down 
 bun src/cli/migrate.ts status
 ```
 
-> **O Bun carrega o `.env` automaticamente, inclusive em `bun test`.** Por isso os testes **não** leem `DATABASE_URL`
-> (a da aplicação): usam `TEST_DATABASE_URL` (padrão `.../wagering_test`) e **recusam** resetar um banco cujo nome não
-> termine em `_test`. Copiar o `.env.example` não afeta os testes (veja a seção seguinte).
+> **O Bun carrega o `.env` automaticamente, inclusive em `bun test`.** Os testes de integração e concorrência leem
+> `DATABASE_URL` e recriam o schema. Por isso, ao testar, passe a URL de um banco descartável na linha de comando (a
+> variável do shell tem precedência sobre o `.env`), como mostrado na seção seguinte.
 
 ## Testes
 
 ```bash
-bun run test:unit              # 182 testes, sem dependências externas
-bun run test:integration       # 121 testes, PostgreSQL REAL (TEST_DATABASE_URL)
+bun run test:unit              # 179 testes, sem dependências externas
+bun run test:integration       # 121 testes, PostgreSQL REAL (DATABASE_URL)
 bun run test:concurrency       # 17 testes, paralelismo real + 3 processos OS
 bun run test:all               # as três suítes acima
 bun run test:e2e               # stack completa (ver abaixo)
 bun run test:load              # teste de carga (bônus)
 ```
 
-Os testes de integração/concorrência usam um banco **descartável** (`TEST_DATABASE_URL`, padrão
+Os testes de integração/concorrência usam um banco **descartável** (`DATABASE_URL`, padrão
 `postgres://wagering:wagering@127.0.0.1:5432/wagering_test`) e **recriam o schema** a cada teste. Nunca aponte para um
 banco com dados. O jeito mais simples é reaproveitar o PostgreSQL do compose:
 
@@ -93,11 +92,10 @@ docker compose exec postgres createdb -U wagering wagering_test
 
 Ou, com um PostgreSQL local: `createdb wagering_test` (usuário `wagering`, superuser, senha `wagering`).
 
-Para usar outro banco, defina `TEST_DATABASE_URL` (o nome **deve terminar em `_test`**; a trava existe porque os testes
-fazem `DROP SCHEMA`; `ALLOW_TEST_DB_RESET=1` a desativa):
+Se existir um `.env` (veja acima), informe a URL explicitamente:
 
 ```bash
-export TEST_DATABASE_URL=postgres://wagering:wagering@127.0.0.1:5432/wagering_test
+export DATABASE_URL=postgres://wagering:wagering@127.0.0.1:5432/wagering_test
 bun run test:integration
 ```
 
@@ -114,13 +112,11 @@ SQS_ENDPOINT=http://localhost:4566 bun run test:e2e
 
 ## Back office
 
-Painel operacional (MVP) em [`backoffice/`](./backoffice). **Guia completo (uso, API, por que não tem senha, testes): [`backoffice.md`](./backoffice.md).**
-É um serviço à parte, **sem dependências npm** (Bun serve a API
+Painel operacional (MVP) em [`backoffice/`](./backoffice): um serviço à parte, **sem dependências npm** (Bun serve a API
 e uma página HTML única). Lê o PostgreSQL diretamente e chama a API de apostas só para reconciliação e métricas.
 
 ```bash
-docker compose --profile backoffice up --build -d   # opt-in: não sobe com `docker compose up` padrão
-                                                     # (ou: bun run backoffice:up; para derrubar: bun run compose:down)
+docker compose up --build -d          # o serviço "backoffice" sobe junto
 open http://localhost:4000            # ou: bun run backoffice:start (fora do Docker; veja .env.example)
 ```
 
@@ -135,20 +131,12 @@ open http://localhost:4000            # ou: bun run backoffice:start (fora do Do
 * **"Reprocessar" não movimenta dinheiro.** Apenas marca a transação como devida agora; o worker de
   `PENDING_REFERENCE` a executa pelo mesmo caso de uso de uma requisição nova (idempotência, orçamento de tentativas e
   TTL continuam valendo). Transações terminais respondem `409`, pois o banco as protege contra alteração.
-* **Acesso e senha:** o painel **não tem login de usuário**; o compose publica a porta só em `127.0.0.1` e
-  `BACKOFFICE_TOKEN` (opcional) exige `Authorization: Bearer <token>` em `/api/*`. Sem ele, a API do painel fica aberta:
-  só para desenvolvimento. Motivos e riscos em [`backoffice.md` §2](./backoffice.md#2-por-que-não-tem-senha-e-o-que-existe-no-lugar).
-* **Testes:** `bun run test:backoffice` (unitários + integração contra o PostgreSQL de teste, com a API simulada).
-  Ficam **fora** do `bun run test:all` e o serviço é opt-in no compose: o enunciado não pede back office, então ele não
-  pode afetar a stack e a suíte padrão (ver o estado de verificação em `backoffice.md`).
+* **Acesso:** o compose publica a porta só em `127.0.0.1`. Defina `BACKOFFICE_TOKEN` para exigir
+  `Authorization: Bearer <token>` em `/api/*` (sem ele, a API do painel fica aberta: só para desenvolvimento).
+* **Testes:** `bun run test:backoffice` (unitários + integração contra o PostgreSQL de teste, com a API simulada;
+  também entram em `bun run test:all`).
 * **Limites do MVP:** paginação por `offset`, sem login de usuários, sem atualização automática da tela, e o painel
   conecta com o role da aplicação (`wagering_app`).
-
-## Roadmap v2
-
-O que fica para a v2 (sharding SQL por carteira, *group commit* para carteira quente, particionamento e retenção, CDC no
-outbox, autenticação real, auditoria de operador, observabilidade agregada, back office v2 e priorização) está em
-[`ARCHITECTURE.md` §17](./ARCHITECTURE.md#17-roadmap-v2-escala-sharding-e-evolução-da-arquitetura).
 
 ## Solução de problemas
 
@@ -157,7 +145,7 @@ outbox, autenticação real, auditoria de operador, observabilidade agregada, ba
 | `bun: command not found` | Bun não instalado ou fora do `PATH` | Seguir [Requisitos](#requisitos) e abrir um novo terminal |
 | `dependency failed to start: container wagering-localstack-1 is unhealthy` | `init-queues.sh` sem permissão de execução: filas não criadas | `chmod +x infra/localstack/init-queues.sh && docker compose down -v && docker compose up --build -d` |
 | `docker: permission denied ... docker.sock` | Usuário fora do grupo `docker` | `sudo usermod -aG docker $USER` e reabrir o terminal |
-| `Refusing to reset database "..."` ao rodar testes | `TEST_DATABASE_URL` aponta para um banco que não termina em `_test` | Usar `.../wagering_test` (padrão) ou, sabendo o que faz, `ALLOW_TEST_DB_RESET=1` |
+| Testes de integração falham com erro de permissão ou DDL | `.env` definiu `DATABASE_URL` com o role `wagering_app` | Passar `DATABASE_URL=postgres://wagering:wagering@127.0.0.1:5432/wagering_test` explicitamente |
 | `database "wagering_test" does not exist` | Banco de teste não criado | `docker compose exec postgres createdb -U wagering wagering_test` |
 | Painel em `localhost:4000` responde 401 | `BACKOFFICE_TOKEN` definido | Informar o token no campo do topo da página |
 | E2E mostra todos os testes como pulados | `E2E_BASE_URLS` ausente | Definir a variável, como na seção [Testes](#testes) |
@@ -223,7 +211,6 @@ src/application/     caso de uso único (HTTP+SQS), portas, parsers, workers (co
 src/infrastructure/  SQL dos repositórios, MikroORM (UoW), migrator, SQS, logs JSON, métricas Prometheus
 src/interfaces/http/ controllers NestJS finos, mapeamento HTTP, AuthGuard no-op, health
 migrations/sql/      NNNN_nome.up.sql / .down.sql (reversíveis)
-backoffice/          painel operacional e de SRE (serviço Bun separado; ver backoffice.md)
 infra/               init do LocalStack (filas) e do PostgreSQL (role de aplicação)
 test/                unit · integration · concurrency · e2e · helpers
 docs/load-test/      relatórios do teste de carga
@@ -242,4 +229,4 @@ rápido listando **todos** os problemas de uma vez. Só `DATABASE_URL` é obriga
 | Papéis da instância | `ROLE_CONSUMER`, `ROLE_OUTBOX_PUBLISHER`, `ROLE_PENDING_REFERENCE` (todos `true`) |
 | Consumidor | `CONSUMER_MAX_RECEIVE_COUNT` (5, deve ser < 10), `CONSUMER_POLLERS` (2), `CONSUMER_BATCH_SIZE` (10), `CONSUMER_WAIT_SECONDS` (20), `SHUTDOWN_TIMEOUT_MS` (25000) |
 | Referência pendente | `REFERENCE_MAX_ATTEMPTS` (10), `REFERENCE_TTL_MS` (900000), `REFERENCE_BASE_DELAY_MS` (2000), `REFERENCE_MAX_DELAY_MS` (120000) |
-| Testes e carga | `TEST_DATABASE_URL`, `ALLOW_TEST_DB_RESET`, `E2E_BASE_URLS`, `DURATION_S`, `CONCURRENCY`, `WALLETS`, `HOT_RATIO`, `DUP_RATIO`, `OUT`, `LOAD_TEST_ALLOW_RESET` |
+| Testes e carga | `E2E_BASE_URLS`, `DURATION_S`, `CONCURRENCY`, `WALLETS`, `HOT_RATIO`, `DUP_RATIO`, `OUT`, `LOAD_TEST_ALLOW_RESET` |

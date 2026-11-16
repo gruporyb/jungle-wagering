@@ -17,41 +17,41 @@
     "mix": "~70% BET, ~10% LOSS, ~10% WIN (referenced), plus duplicate resends"
   },
   "results": {
-    "requests": 7605,
-    "throughputPerSecond": 498.2,
+    "requests": 8626,
+    "throughputPerSecond": 566.6,
     "latencyMs": {
-      "p50": 11.84,
-      "p95": 380.47,
-      "p99": 991.94,
-      "max": 2988.27
+      "p50": 10.22,
+      "p95": 344.74,
+      "p99": 886.63,
+      "max": 2658.82
     },
     "statuses": {
-      "200": 7605
+      "200": 8626
     },
     "errorRate": 0,
-    "duplicatesDetected": 785,
+    "duplicatesDetected": 884,
     "concurrencyConflicts": {
-      "lockWaited": 1012,
+      "lockWaited": 1111,
       "lockTimeouts": 0,
       "deadlockRetries": 0,
       "lockWaitMs": {
-        "p50": 0.72,
-        "p99": 1043.86,
-        "max": 2970.65
+        "p50": 0.64,
+        "p99": 909,
+        "max": 2645.32
       }
     },
     "outbox": {
-      "eventsPublished": 13373,
-      "lagSecondsP95": 0.146,
-      "lagSecondsMax": 0.295,
+      "eventsPublished": 15134,
+      "lagSecondsP95": 0.19,
+      "lagSecondsMax": 0.458,
       "drainAfterLoadMs": 54
     }
   },
   "invariants": {
     "walletsDivergingFromLedger": 0,
     "negativeBalances": 0,
-    "ledgerEntriesExpected": 6353,
-    "ledgerEntriesActual": 6353,
+    "ledgerEntriesExpected": 7192,
+    "ledgerEntriesActual": 7192,
     "ledgerMatchesProcessedTransactions": true,
     "stuckPending": 0
   }

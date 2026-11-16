@@ -4,9 +4,10 @@ Processador distribuído de apostas: recebe transações de provedores de jogos 
 forma idempotente e segura sob concorrência em carteiras com **ledger auditável**, e publica eventos por **outbox
 transacional**.
 
-> **Estado de verificação (seção 15):** 317 testes executados (179 unitários, 121 de integração, 17 de concorrência) passam contra
-> um PostgreSQL 16 real; a stack Docker Compose (3 instâncias + PostgreSQL + LocalStack) sobe saudável e os 10 testes
-> e2e (HTTP em 3 instâncias e SQS real) passam. A seção 15 lista o que ainda **não** é coberto.
+> **Leia primeiro: o que foi e o que não foi executado** (seção 15). Todo o núcleo (domínio, casos de uso,
+> repositórios, migrations, consumidor, outbox, workers) roda contra um PostgreSQL 16 real e está testado. A camada de
+> framework (NestJS, adaptador MikroORM, cliente AWS SDK) e a stack Docker Compose foram escritas e verificadas
+> estaticamente, mas **não foram executadas** no ambiente em que este projeto foi produzido (sem rede e sem Docker).
 
 ## 1. Princípio de projeto: cada garantia mora na camada mais baixa que consegue impô-la
 
@@ -310,7 +311,7 @@ Banco **real** (PostgreSQL 16) em todos os testes de integração e concorrênci
 
 | Camada | Qtde | O que prova |
 |---|---|---|
-| Unidade (`test/unit`) | 182 | `Money` (escala, arredondamento recusado, entradas inválidas), invariantes de `Wallet`, regras BET/WIN/LOSS/REFUND/ROLLBACK, moedas, máquina de estados, hash canônico, mapeamento HTTP, logger, métricas, config |
+| Unidade (`test/unit`) | 179 | `Money` (escala, arredondamento recusado, entradas inválidas), invariantes de `Wallet`, regras BET/WIN/LOSS/REFUND/ROLLBACK, moedas, máquina de estados, hash canônico, mapeamento HTTP, logger, métricas, config |
 | Integração (`test/integration`) | 121 | migrations e constraints (`up→down→up`), atomicidade carteira+ledger+inbox+outbox, imutabilidade do ledger, inbox/redelivery, retry/DLQ/shutdown, publishers concorrentes, recuperação após crash, `PENDING_REFERENCE`, role de aplicação de menor privilégio |
 | Concorrência (`test/concurrency`) | 17 | os 8 itens obrigatórios, com paralelismo real e **3 processos OS** (`Bun.spawn`) |
 | E2E (`test/e2e`) | 10 | stack completa: 3 instâncias + LocalStack (**não executados aqui**, §15) |
@@ -347,50 +348,38 @@ O número de `deadlockRetries` foi 0, como previsto pelo desenho de uma carteira
 
 ## 15. Limitações, riscos e o que NÃO foi verificado
 
-**Verificado por execução** (Bun 1.4.4, PostgreSQL 16, Docker Compose com LocalStack 3.8.1):
+**Não verificado por execução (ambiente de autoria sem rede/Docker):**
 
-* `test:unit` 179 (hoje 182, ver abaixo), `test:integration` 121 (PostgreSQL real) e `test:concurrency` 17 (inclui 3 processos reais e SIGKILL no
-  meio do processamento): **317 passando, 0 falhas**. Depois dessa execução entraram 3 testes unitários da trava de
-  banco de teste (`test/unit/test-database-guard.test.ts`; lógica validada em Node, ainda não executados no Bun).
-* `docker compose up --build -d`: PostgreSQL, LocalStack e as 3 instâncias `healthy`; `test:e2e` **10/10** (o cenário
-  obrigatório, 50 duplicatas em paralelo entre instâncias, códigos HTTP distintos, REFUND fora de ordem, reconciliação,
-  paginação, consumo SQS com duplicatas, DLQ e outbox para a fila de eventos).
-* `test:load` reproduzido em outra máquina (i7-1165G7, 8 CPUs, 15,9 GB; PostgreSQL e gerador na mesma máquina): 7 605
-  requisições em 15 s, 498 req/s, p50/p95/p99 de 11,8/380/992 ms, 0 erros, 0 divergências entre saldo e ledger. Os
-  números diferem dos da seção 14 porque o ambiente e a mistura de carga são outros: continuam **indicativos**.
-* O adaptador MikroORM (`transactional()` + `execute()` na mesma conexão), o AWS SDK (`ReceiveMessage` com atributos de
-  sistema) e o healthcheck do LocalStack, que eram os pontos de maior risco, foram exercitados pelo e2e sem ajuste de
-  código. O único defeito na primeira execução real foi **operacional**: o `init-queues.sh` perdia o bit de execução ao
-  baixar o projeto como `.zip`, as filas não eram criadas e o `localstack` nunca ficava `healthy`. O pacote agora o traz
-  executável e o README documenta o `chmod +x`.
+1. `bun install` **não rodou** (sem acesso ao registro): `node_modules` e `bun.lock` não existem. `package.json`
+   declara `@nestjs/*`, `@mikro-orm/*`, `@aws-sdk/client-sqs`.
+2. **Nunca executados:** `app.module.ts`, `controllers.ts`, `exception-filter.ts`, `main.ts` (NestJS),
+   `mikro-orm-unit-of-work.ts` (adaptador MikroORM) e `sqs-queue-client.ts` (AWS SDK). Foram verificados por
+   transpilação (sintaxe) e por `tsc --strict` contra **os meus próprios tipos**, com os pacotes de terceiros
+   ausentes (portanto sem checar a assinatura real das bibliotecas).
+3. `docker compose up`, a imagem, o script do LocalStack e o teste e2e **nunca rodaram**. YAML e `bash -n` foram
+   validados; o fluxo completo rodando com o role de menor privilégio (`wagering_app`) **foi** testado contra o banco.
+4. Os testes de integração do consumidor usam uma **fila FIFO em memória** (`test/helpers/in-memory-queue.ts`,
+   modelada na semântica do SQS: grupo, visibility, receive count, redrive) com o **PostgreSQL real**. O enunciado
+   pede LocalStack/MiniStack em contêiner nos testes de integração: isso só está coberto pelo e2e, não executado.
 
-**Não coberto por testes (lacunas conhecidas):**
-
-1. Os testes de integração do **consumidor** (retry com backoff, DLQ por `maxReceiveCount`, crash entre commit e ack,
-   SIGTERM) usam uma **fila FIFO em memória** (`test/helpers/in-memory-queue.ts`, modelada na semântica do SQS: grupo,
-   visibility, receive count, redrive) com o **PostgreSQL real**. Contra o **SQS real** (LocalStack) o e2e cobre apenas
-   consumo com deduplicação, mensagem inválida na DLQ e outbox para a fila de eventos. Retry com visibilidade real,
-   `RedrivePolicy`, redelivery após crash e devolução de mensagens no SIGTERM **não** têm teste contra o SQS real.
-2. O `package.json` não tem script de verificação de tipos (`tsc --noEmit`): o Bun executa sem checar tipos.
-3. O **back office** (seção 16) tem testes escritos, mas **não executados**; por isso é opt-in no compose (`--profile
-   backoffice`) e fica fora do `test:all`.
-4. Medições de carga são indicativas (gerador e banco na mesma máquina).
+**Pontos de maior risco ao rodar pela primeira vez:** (a) `EntityManager.execute()` do MikroORM recebe bindings `?`
+(Knex); a conversão `$n → ?` (`sql-params.ts`) é testada isoladamente, mas a chamada real não; (b)
+`transactional()` + `execute()` precisam compartilhar a conexão da transação (comportamento documentado do MikroORM
+v6, não confirmado aqui); (c) formato exato de `ReceiveMessage` com `MessageSystemAttributeNames` no SDK usado;
+(d) a imagem do LocalStack fixada (3.8.1) e o `healthcheck` com `awslocal`.
 
 **Limitações de desenho (conhecidas e aceitas):** at-least-once no outbox; ordem de eventos não global entre
 instâncias; bloqueio de cabeça de fila do FIFO por carteira; carteira única limitada a ~286 req/s; ids UUID v4 (sem
 localidade de índice do v7); sem particionamento de tabelas, sem política de retenção/arquivamento do ledger e do
-outbox publicado; autenticação apenas como ponto de extensão; métricas por instância (sem agregação). O que fazer a respeito, e em que
-ordem, está na [seção 17 (roadmap v2)](#17-roadmap-v2-escala-sharding-e-evolução-da-arquitetura).
+outbox publicado; autenticação apenas como ponto de extensão; métricas por instância (sem agregação).
 
 
 ---
 
 ## 16. BÔNUS: MVP do Back Office Operacional e SRE
 
-**Documentação completa (uso, API, segurança e testes): [`backoffice.md`](./backoffice.md).**
-
 Implementado em [`backoffice/`](./backoffice): serviço Bun sem dependências (HTTP + uma página HTML), na porta 4000 do
-compose, **opt-in** (`docker compose --profile backoffice up --build -d`): não faz parte da stack padrão nem do `test:all`. Leitura direta do PostgreSQL e chamadas à API só onde a regra já mora nela.
+compose. Leitura direta do PostgreSQL e chamadas à API só onde a regra já mora nela.
 
 1. **Transações:** totais por status e listagem filtrável (`PENDING`, `PENDING_REFERENCE`, `PROCESSED`, `REJECTED`,
    `FAILED`), com a ação **reprocessar agora** para `PENDING_REFERENCE`.
@@ -401,160 +390,4 @@ Decisões: o reprocessamento só reagenda `reference_next_attempt_at = now()` (�
 `status = 'PENDING_REFERENCE'`); quem processa continua sendo o worker, pelo mesmo caso de uso, então nenhuma regra
 financeira é duplicada e o painel nunca escreve em saldo ou ledger. Transações terminais são imutáveis no banco (trigger),
 logo o retry nelas devolve `409`. Todas as consultas são parametrizadas; filtros são validados contra listas fechadas.
-Autenticação do painel: token compartilhado **opcional** (`BACKOFFICE_TOKEN`) e porta só em `127.0.0.1`; login por usuário
-é extensão futura, coerente com a autenticação da API (ponto de extensão, §12). O porquê e os riscos estão em
-[`backoffice.md` §2](./backoffice.md#2-por-que-não-tem-senha-e-o-que-existe-no-lugar).
-
-
----
-
-## 17. Roadmap v2: escala, sharding e evolução da arquitetura
-
-Nada aqui é necessário para a v1 estar correta: as garantias financeiras (seção 1) já valem com 1 ou N instâncias sobre
-**um** PostgreSQL. Esta seção lista o que muda quando o volume, a operação ou a regulação passarem do que um primário único
-sustenta, e **em que ordem** atacar. A medição da seção 14 (sandbox de 2 vCPU, indicativa) mostra o que apareceu primeiro:
-a carteira quente (~286 req/s, limite físico da linha), depois o publisher único do outbox (~2 000 eventos/s). O banco
-ainda **não** era o limite com carteiras distribuídas, então sharding é a última etapa, não a primeira.
-
-### 17.1 Escada de escala (do mais barato ao mais caro)
-
-| # | Passo | Resolve | Custo |
-|---|---|---|---|
-| 1 | Mais instâncias do publisher/consumidor (já seguro: `SKIP LOCKED`, FIFO por carteira) | lag do outbox (§14) | configuração |
-| 2 | PgBouncer/RDS Proxy: hoje são `instâncias × DB_POOL_MAX` conexões (3 × 20); o `Migrator` usa advisory lock, então ele conecta direto | limite de conexões | baixo |
-| 3 | Réplica de leitura para consultas, reconciliação e back office | tirar leitura do primário | baixo; atenção ao atraso de réplica |
-| 4 | Instância maior + ajuste de PostgreSQL (`shared_buffers`, WAL, storage de baixa latência) | todo o resto, até o teto | baixo |
-| 5 | Particionamento por tempo e arquivamento (17.4) | tamanho de tabela e de índice | médio |
-| 6 | *Group commit* por carteira (17.3) | carteira quente | médio |
-| 7 | **Sharding por carteira (17.2)** | teto de escrita do primário | alto: muda operação, não regras |
-
-### 17.2 Sharding SQL
-
-**Chave: a carteira.** Todo estado financeiro é por carteira (saldo, versão, ledger, transações), o lock já é por carteira
-e o domínio **já exige** que uma referência (REFUND/ROLLBACK/WIN/LOSS) aponte para transação da *mesma* carteira, jogador e
-moeda (`evaluateReference`). Isso significa que **não existe transação distribuída entre carteiras**: cada shard continua
-impondo, sozinho, tudo o que a seção 1 lista (CHECKs, triggers do ledger, índice único de reversão, `FOR NO KEY UPDATE`).
-
-```
- HTTP / SQS --> router (walletId -> shard lógico -> banco físico) --> shard N: wallets + wager_transactions
-                  ^ tabela de rotas versionada                                 + ledger + inbox + outbox
- workers (consumidor, outbox, PENDING_REFERENCE) rodam POR SHARD; migrations rodam em CADA shard
-```
-
-* **Shards lógicos, não físicos.** Ex.: 1 024 shards lógicos mapeados para N bancos. Mover carga é trocar o mapa, não
-  rehashear.
-* **Roteamento sem consulta.** O `walletId` carrega o shard lógico (ex.: UUID v7 em que os primeiros bits aleatórios são
-  o id do shard). Isso resolve também a nota de localidade de índice do UUID v4 (§15). A **criação** de carteira roteia por
-  `hash(playerId)`, para manter `UNIQUE (player_id, currency)` dentro de um único shard.
-* **Mensageria.** `MessageGroupId = walletId` já garante a ordem por carteira; o consumidor roteia pelo `walletId` do
-  corpo, então duplicatas da mesma `messageId` caem sempre na mesma inbox. Filas por shard (ou grupo de shards) isolam
-  vizinhos barulhentos; conferir as cotas de vazão do SQS FIFO vigentes antes de dimensionar.
-* **Outbox por shard**, com `seq` próprio: **não há ordem global de eventos** (só por carteira, como hoje). Consumidores
-  continuam deduplicando por `eventId`.
-* **Leitura agregada.** Listagem global, totais por status, reconciliação em massa e o back office deixam de ser uma
-  consulta única: alimentar um *read model* (CDC para um banco de relatórios) em vez de fazer *scatter-gather*.
-
-**O problema difícil: idempotência global.** Hoje `UNIQUE (provider_id, external_transaction_id)` e `UNIQUE
-(idempotency_key)` são globais, e reenviar o mesmo id externo com **outra carteira** dá `409`. Com sharding por carteira
-essa duplicata cairia em outro shard e passaria. Opções, da mais barata à mais forte:
-
-1. **Contrato:** o id externo é único por `(provedor, carteira)`; combinar com os provedores e documentar. Detecção
-   residual por auditoria assíncrona (CDC) com alerta.
-2. **Registro global de idempotência** (KV com *put* condicional, ou tabela mínima própria) consultado antes de rotear.
-   Preserva o `409`, mas adiciona um salto e um componente crítico (precisa de HA).
-
-**Ferramentas.** O desenho é amigável a *sharding* de aplicação sobre PostgreSQL comum (o que mais preserva o que já foi
-provado). Citus exige que índices únicos incluam a coluna de distribuição, o que reabre exatamente a questão acima. Motores
-SQL distribuídos mudam isolamento e locking; o projeto depende de **triggers** (ledger imutável, consistência
-saldo × ledger *deferred*), CHECKs, índice único parcial e `FOR NO KEY UPDATE`: validar cada um antes de adotar qualquer
-motor, e repetir as suítes de concorrência e SIGKILL (seção 13) contra ele.
-
-**Resharding (mover um shard lógico).** (1) marcar o shard como *draining*: requisições recebem `503 + Retry-After` e
-mensagens SQS não são confirmadas, ambos já seguros pela taxonomia de erros transitórios; (2) esperar as transações em
-voo; (3) copiar (replicação lógica ou dump); (4) validar com `ReconcileWalletUseCase` e *checksums* do ledger; (5) trocar
-a rota; (6) manter a origem somente leitura por um período antes de apagá-la.
-
-**O que sharding NÃO resolve:** uma carteira é um único shard, então o limite de ~286 req/s por carteira continua (17.3).
-Também introduz custo operacional real: migrations em N bancos (padrão *expand/contract* e política de versões
-convivendo), backup e PITR por shard, e monitoramento por shard. **Se algum dia surgir transferência entre carteiras ou
-bônus entre jogadores, deixa de valer "sem transação distribuída"** e é preciso uma saga com ledger de compensação.
-
-### 17.3 Carteira quente: *group commit*
-
-O teto de uma carteira é a serialização do commit. Como o consumidor SQS já recebe em ordem por `MessageGroupId`, v2 pode
-aplicar **várias transações da mesma carteira em uma só transação SQL** (um lock, um `UPDATE` de saldo, N lançamentos de
-ledger, um `COMMIT`), mantendo **uma linha de ledger e um resultado por transação**. Cuidados: isolamento por *savepoint*
-para que uma rejeição ou mensagem venenosa não derrube as vizinhas do lote, tamanho máximo de lote e invariantes
-validadas pelas mesmas suítes de concorrência. O caminho HTTP fica como está (uma por requisição).
-
-### 17.4 Ciclo de vida dos dados
-
-* Particionar `wallet_ledger_entries`, `wager_transactions`, `outbox_messages` e `inbox_messages` por mês (ex.:
-  `pg_partman`); arquivar partições antigas em armazenamento frio (S3/Parquet) e manter retenção de **inbox** (janela de
-  deduplicação) e de **outbox publicado**.
-* **Tensão a resolver antes:** em tabela particionada, índice único precisa conter a chave de partição, e hoje
-  `idempotency_key` e `(provider, external id)` são únicos globalmente. Alternativas: janela de idempotência por tempo
-  (único por partição + registro global curto) ou o registro de idempotência de 17.2.
-* O ledger é protegido por triggers contra `UPDATE/DELETE/TRUNCATE`; destacar partição para arquivar exige um **papel de
-  manutenção** explícito e auditado, sem afrouxar o papel da aplicação.
-
-### 17.5 Eventos
-
-* Trocar o publisher por polling por **CDC** (replicação lógica, ex.: Debezium) mantendo a tabela outbox como contrato:
-  menos latência e sem o publisher como gargalo. Mantém *at-least-once* e `eventId` estável.
-* Registro de esquema e versionamento dos eventos (hoje o tipo e a versão vão no nome da classe).
-* DLQ de eventos e **ferramenta de reprocesso** (listar, inspecionar `reason`, reenviar ou descartar com auditoria).
-
-### 17.6 Segurança e auditoria
-
-* Autenticação real (OIDC/JWT validado no JWKS; `azp` → `providerId` imposto contra o payload), *rate limit* e limites por
-  provedor, mTLS opcional; segredos em gerenciador de segredos, não em variáveis de ambiente em texto.
-* **Auditoria de ações de operador:** hoje o `retry` do back office é um `UPDATE` sem trilha. Criar `operator_actions`
-  (quem, quando, o quê, correlação), de escrita única como o ledger.
-* Ledger com **encadeamento de hash** (cada lançamento inclui o hash do anterior) se a regulação pedir evidência de
-  adulteração além das travas do banco.
-
-### 17.7 Observabilidade e operação
-
-* Métricas **agregadas** (Prometheus raspando todas as instâncias; hoje são por instância), painéis e alertas/SLOs:
-  atraso do outbox, backlog de `PENDING_REFERENCE`, profundidade das DLQs, `wallet_lock_conflicts_total` com *timeout*,
-  taxa de `503`, divergência na reconciliação.
-* Tracing distribuído (OpenTelemetry) reaproveitando o `X-Correlation-Id` que já atravessa HTTP, SQS e logs.
-* **Reconciliação contínua:** worker agendado, com *checkpoints* de saldo periódicos para não reler o ledger inteiro da
-  carteira; divergência vira métrica e alerta, continua sem correção automática.
-* HA e recuperação: failover do PostgreSQL (Patroni/gerenciado), backups com PITR e RPO/RTO definidos, ensaios de
-  restauração. Multi-região ativo-ativo só com carteira "pertencendo" a uma região (sharding por região); fora disso,
-  DR ativo-passivo.
-
-### 17.8 Back office v2
-
-Hoje é um MVP (seção 16; detalhes em [`backoffice.md`](./backoffice.md)). Evoluções: login e papéis (SSO, perfil só-leitura × operador); papel de banco **somente leitura**
-para consultas e um papel estreito só para o reagendamento; paginação por *keyset* (o `offset` degrada em tabelas
-grandes); consultas em réplica ou no *read model*; atualização automática da tela; visão de carteira (saldo, ledger,
-reconciliação); inspeção e *redrive* de DLQ; exportação CSV; todas as ações registradas em `operator_actions`.
-
-### 17.9 Modelo de dinheiro
-
-`Money` é decimal exato com **escala fixa 2** (`numeric(19,2)`), o que não cobre moedas com 0 ou 3 casas nem ativos
-cripto. v2: valor em **unidades mínimas** (inteiro) + expoente da moeda, com tabela de moedas. Câmbio, se houver, fica
-fora do ledger de carteira (carteira continua mono-moeda).
-
-### 17.10 Qualidade e entrega
-
-* CI com PostgreSQL e **LocalStack reais** (integração do consumidor hoje usa fila em memória, §15), e o E2E como etapa.
-* Testes de caos no compose (derrubar PostgreSQL ou LocalStack no meio da carga) e carga HTTP/SQS em ambiente dedicado,
-  com PostgreSQL ajustado, para substituir o número indicativo da seção 14.
-* OpenAPI gerado e testes de contrato com os provedores; política de versionamento da API e dos eventos.
-* IaC e orquestração (HPA por profundidade de fila e por atraso do outbox).
-
-### 17.11 Priorização
-
-| Prioridade | Itens | Gatilho |
-|---|---|---|
-| **P1: antes de produção** | autenticação real + *rate limit*; auditoria de operador; métricas agregadas e alertas; PgBouncer; backup/PITR; CI com LocalStack | go-live |
-| **P2: crescimento** | réplica de leitura; particionamento e retenção; *group commit*; DLQ com ferramenta de reprocesso; back office v2; reconciliação contínua; dinheiro em unidades mínimas | tabelas grandes, carteira quente real, operação diária |
-| **P3: escala ou regulação** | **sharding por carteira** + registro de idempotência; CDC; multi-região; ledger com hash encadeado | primário no teto da maior instância viável (CPU, IOPS, WAL ou tamanho), ou exigência regulatória |
-
-Para decidir o gatilho de sharding, acompanhar no primário: taxa de commits e latência de commit, saturação de
-IOPS/WAL, tempo de *autovacuum* e tamanho de tabelas/índices, e `wallet_lock_conflicts_total`. Se o gargalo for **uma**
-carteira, sharding não ajuda: é o caso de 17.3.
+Autenticação do painel: token compartilhado opcional (`BACKOFFICE_TOKEN`); o login por usuário é uma extensão futura.

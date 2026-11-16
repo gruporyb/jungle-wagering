@@ -95,9 +95,8 @@ services:
       - "3003:3000"
 
   # Operations/SRE panel (http://localhost:4000). Reads PostgreSQL directly, calls the API for reconciliation/metrics.
-  # OPT-IN (profile "backoffice"). Bound to localhost; set BACKOFFICE_TOKEN (in a .env next to this file) before exposing it anywhere else.
+  # Bound to localhost; set BACKOFFICE_TOKEN (in a .env next to this file) before exposing it anywhere else.
   backoffice:
-    profiles: ["backoffice"]   # opt-in: `docker compose --profile backoffice up --build -d` (not part of the default stack)
     build: ./backoffice
     restart: unless-stopped
     depends_on:
